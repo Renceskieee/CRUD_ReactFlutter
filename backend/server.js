@@ -243,6 +243,60 @@ app.post('/login', async (req, res) => {
   }
 });
 
+// Update user profile (edit name and profile picture)
+app.put('/api/users/:id', upload.single('p_pic'), async (req, res) => {
+  const { id } = req.params;
+  const { f_name, l_name } = req.body;
+  const p_pic = req.file ? req.file.filename : null;
+
+  if (!f_name || !l_name) {
+    return res.status(400).json({ error: 'First name and last name are required' });
+  }
+
+  try {
+    // Check if user exists
+    const [users] = await db.promise().query('SELECT * FROM users WHERE id = ?', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    let updateQuery = 'UPDATE users SET f_name = ?, l_name = ?';
+    const params = [f_name, l_name];
+
+    if (p_pic) {
+      updateQuery += ', p_pic = ?';
+      params.push(p_pic);
+    }
+
+    updateQuery += ' WHERE id = ?';
+    params.push(id);
+
+    await db.promise().query(updateQuery, params);
+
+    res.json({ message: 'Profile updated successfully' });
+  } catch (error) {
+    console.error('Error updating profile:', error);
+    res.status(500).json({ error: 'Server error during profile update' });
+  }
+});
+
+// View user profile
+app.get('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [rows] = await db.promise().query('SELECT id, email, username, role, employee_number, f_name, l_name, p_pic, created_at FROM users WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json(rows[0]);
+  } catch (error) {
+    console.error('Error fetching user profile:', error);
+    res.status(500).json({ error: 'Server error during profile fetch' });
+  }
+});
+
 // Start the server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
