@@ -41,7 +41,7 @@ const db = mysql.createConnection({
   host: 'localhost',
   user: 'root',
   password: '', // Update with your actual password
-  database: 'testdb'
+  database: 'earist_mobilehris'
 });
 
 // Connect to database
@@ -69,84 +69,53 @@ io.on('connection', (socket) => {
 });
 
 // API Routes
-// Get all records
-app.get('/records', (req, res) => { 
-  db.query('SELECT * FROM records', (err, results) => {
+// ===== LEAVE REQUEST ENDPOINTS =====
+// Get all leave requests
+app.get('/leave_requests', (req, res) => {
+  db.query('SELECT * FROM leave_request', (err, results) => {
     if (err) {
-      console.error('Error fetching records:', err);
+      console.error('Error fetching leave requests:', err);
       return res.status(500).json({ error: 'Database error', details: err.message });
     }
     res.json(results);
   });
 });
 
-// Create a record
-app.post('/records', (req, res) => {
-  const { name } = req.body;
-  
-  if (!name) {
-    return res.status(400).json({ error: 'Name is required' });
-  }
-  
-  console.log('📝 Adding new record:', { name });
-  
-  db.query('INSERT INTO records (name) VALUES (?)', [name], (err, result) => {
-    if (err) {
-      console.error('Error creating record:', err);
-      return res.status(500).json({ error: 'Database error', details: err.message });
-    }
-    
-    const newRecord = { id: result.insertId, name };
-    notifyClients('added', newRecord);
-    res.status(201).json(newRecord);
-  });
-});
-
-// Update a record
-app.put('/records/:id', (req, res) => {
+// Update leave request status only
+app.put('/leave_requests/:id', (req, res) => {
   const { id } = req.params;
-  const { name } = req.body;
-  
-  if (!name) {
-    return res.status(400).json({ error: 'Name is required' });
+  const { status } = req.body;
+  if (!['Pending', 'Approved', 'Rejected'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status value' });
   }
-  
-  console.log('✏️ Updating record:', { id, name });
-  
-  db.query('UPDATE records SET name = ? WHERE id = ?', [name, id], (err, result) => {
-    if (err) {
-      console.error('Error updating record:', err);
-      return res.status(500).json({ error: 'Database error', details: err.message });
+  // Get leave_request first to get employee_id
+  db.query('SELECT * FROM leave_request WHERE id = ?', [id], (err, leaveRows) => {
+    if (err || leaveRows.length === 0) {
+      return res.status(404).json({ error: 'Leave request not found' });
     }
-    
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Record not found' });
-    }
-    
-    const updatedRecord = { id: parseInt(id), name };
-    notifyClients('updated', updatedRecord);
-    res.json(updatedRecord);
-  });
-});
-
-// Delete a record
-app.delete('/records/:id', (req, res) => {
-  const { id } = req.params;
-  
-  console.log('🗑️ Deleting record:', { id });
-  
-  db.query('DELETE FROM records WHERE id = ?', [id], (err, result) => {
-    if (err) {
-      console.error('Error deleting record:', err);
-      return res.status(500).json({ error: 'Database error', details: err.message });
-    }
-    
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Record not found' });
-    }
-    
-    notifyClients('deleted', { id: parseInt(id) });
-    res.json({ id: parseInt(id) });
+    const leave = leaveRows[0];
+    db.query('UPDATE leave_request SET status = ? WHERE id = ?', [status, id], (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: 'Database error', details: err.message });
+      }
+      // Insert notification
+      db.query('INSERT INTO notification (user_id, leave_request_id, status) VALUES (?, ?, ?)', [leave.employee_id, id, status], (err, notifResult) => {
+        if (err) {
+          return res.status(500).json({ error: 'Notification insert error', details: err.message });
+        }
+        // Join notification + user + leave_request for socket event
+        db.query(`SELECT n.*, u.f_name, u.l_name, u.username, u.email, u.role, u.p_pic, l.leave_type, l.start_date, l.end_date FROM notification n
+          JOIN users u ON n.user_id = u.id
+          JOIN leave_request l ON n.leave_request_id = l.id
+          WHERE n.id = ?`, [notifResult.insertId], (err, joinRows) => {
+          if (!err && joinRows.length > 0) {
+            io.emit('notification', joinRows[0]);
+          }
+        });
+        notifyClients('leave_request_status_updated', { id: parseInt(id), status });
+        res.json({ id: parseInt(id), status });
+      });
+    });
   });
 });
 
@@ -295,6 +264,66 @@ app.get('/api/users/:id', async (req, res) => {
     console.error('Error fetching user profile:', error);
     res.status(500).json({ error: 'Server error during profile fetch' });
   }
+});
+
+// Add POST /api/leave-request endpoint
+app.post('/api/leave-request', (req, res) => {
+  const { employee_id, leave_type, start_date, end_date } = req.body;
+
+  if (!employee_id || !leave_type || !start_date || !end_date) {
+    return res.status(400).json({ message: 'All fields are required.' });
+  }
+
+  const sql = `
+    INSERT INTO leave_request (employee_id, leave_type, start_date, end_date, status)
+    VALUES (?, ?, ?, ?, 'Pending')
+  `;
+  db.query(sql, [employee_id, leave_type, start_date, end_date], (err, result) => {
+    if (err) {
+      console.error('Error inserting leave request:', err);
+      return res.status(500).json({ message: 'Server error' });
+    }
+    res.json({ success: true, id: result.insertId });
+  });
+});
+
+// Update PUT /api/users/:id to allow updating only the profile picture if only a file is uploaded
+app.put('/api/users/:id/pic', upload.single('p_pic'), async (req, res) => {
+  const { id } = req.params;
+  const p_pic = req.file ? req.file.filename : null;
+
+  if (!p_pic) {
+    return res.status(400).json({ error: 'No profile picture uploaded' });
+  }
+
+  try {
+    const [users] = await db.promise().query('SELECT * FROM users WHERE id = ?', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const updateQuery = 'UPDATE users SET p_pic = ? WHERE id = ?';
+    await db.promise().query(updateQuery, [p_pic, id]);
+
+    res.json({ message: 'Profile picture updated successfully' });
+  } catch (error) {
+    console.error('Error updating profile picture:', error);
+    res.status(500).json({ error: 'Server error during profile picture update' });
+  }
+});
+
+// 3. GET /notifications endpoint (joined)
+app.get('/notifications', (req, res) => {
+  db.query(`SELECT n.*, u.f_name, u.l_name, u.username, u.email, u.role, u.p_pic, l.leave_type, l.start_date, l.end_date
+    FROM notification n
+    JOIN users u ON n.user_id = u.id
+    JOIN leave_request l ON n.leave_request_id = l.id
+    ORDER BY n.created_at DESC`, (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: 'Database error', details: err.message });
+    }
+    res.json(rows);
+  });
 });
 
 // Start the server
